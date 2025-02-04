@@ -1,0 +1,145 @@
+
+int adc_data = 0;
+bool mode = 1;
+bool lastButtonState = HIGH;  // Not pressed button
+bool buttoncheck;
+volatile long frequency = 10000;
+long frequencyhop = 0;
+
+// PINY
+// A0 ADC IN
+// D12 PWM OUTPUT
+// D5 SIGNAL LED
+// D4 MODE SWITCH (FREQUENCY|DUTY)
+// D20 FREQUENCY ADD
+// D21 FREQUENCY SUBTRACT
+// changing frequency value - set value via potentiometer then manipulate main using buttons. If I had a rotary encoder I would have put it in also had only one potentiometer :D
+
+
+// PWM
+// PROBLEMS WITH FREQUENCY - FLOATING POINT, MEASURING, MCU accuracy
+// OCR1A value (CLOCKFREQ/(2(due to fast pwm)*prescaler*frequency)) - 1
+// OCR1A value has to start from 3
+byte p0 = (1<<WGM13) | (1<<CS10);
+double p0OCR = 8000000;
+byte p8 = (1<<WGM13) | (1<<CS11);
+double p8OCR = 1000000;
+byte p64 = (1<<WGM13) | (1<<CS10) | (1<<CS11); 
+double p64OCR = 125000;
+unsigned char duty = 127;
+
+// debouncing
+unsigned long lastInterruptTime = 0;  // store last interrupt trigger
+unsigned long debounceDelay = 50;     // Debounce delay (in milliseconds)
+
+// Interrupt Service Routine (ISR) for INT0 (PD0) SUBTRACT
+ISR(INT0_vect) {
+    if (millis() - lastInterruptTime > debounceDelay) {
+        // subtract
+        frequency -= frequencyhop; 
+        if(frequency <= 2){
+          frequency = 2;
+        }
+        lastInterruptTime = millis();  // Update the last interrupt time
+    }
+}
+
+// Interrupt Service Routine (ISR) for INT1 (PD1)
+ISR(INT1_vect) {
+    if (millis() - lastInterruptTime > debounceDelay) {
+            frequency += frequencyhop; 
+        if(frequency >= 2650000){
+          frequency = 2650000;
+        }
+
+        lastInterruptTime = millis();  // Update the last interrupt time
+    }
+}
+
+void changefrequency(double freq) {
+  // Check which frequency range the 'freq' falls into
+  if (freq >= 24000 && freq <= 2650000) {  // Range 1: 121 Hz to 2.65 MHz
+    TCCR1B = p0;
+    OCR1A = p0OCR / freq;
+  }
+  else if (freq >= 12000 && freq <= 24000) {  // Range 2: 16 Hz to 330 kHz
+    TCCR1B = p8;
+    OCR1A = p8OCR / freq;
+  }
+  else if (freq >= 2 && freq <= 12000) {  // Range 3: 2 Hz to 41 kHz
+    TCCR1B = p64;
+    OCR1A = p64OCR / freq;
+  }
+  else {
+    Serial.println("Frequency is out of the defined ranges.");
+  }
+ changepwmduty(duty); // recalculate
+
+}
+
+void changepwmduty(unsigned char duty){
+ OCR1B = OCR1A * (duty / 255.0);  // Adjust the duty cycle as a proportion of OCR1A
+}
+
+void setup() {
+  Serial.begin(9600);
+  // pwm output
+  DDRB = (1 << PB6);
+
+    // BUTTON MODE SWITCH
+  DDRG &= ~(1 << PG5);
+  PORTG |= (1 << PG5);
+
+  DDRE = (1 << PE3);  // SIGNAL LED DUTY / FREQUENCY (ON = FREQUENCY)
+
+  // ADC
+  ADMUX = (1 << REFS0);
+
+    // enable ADC - ADEN; prescaler to 128 = 125KHz sample rate - ADPS2 ADPS1 ADPS0; Auto-Trigger Enable - ADATE; samples collect ADSC;
+  ADCSRA = (1 << ADEN) | (1 << ADPS2) | (1 << ADPS1) | (1 << ADPS0) | (1 << ADATE) | (1 << ADSC);
+  // while ((ADCSRA & (1 << ADIF)) == 0);
+  // prepare PWM
+  TCCR1A = (1<<COM1B1) | (1<< WGM10); //0b100001 // Non-inverting mode, clear OC1A on compare match (output PWM on pin D12)
+
+    // INTERRUPT PD 0 and 1
+    // Set pin 0 (PD0) and pin 1 (PD1) as input with pull-up resistors
+    DDRD &= ~((1 << PD0) | (1 << PD1));  // Set PD0 and PD1 as inputs
+    PORTD |= (1 << PD0) | (1 << PD1);    // Enable pull-up resistors on PD0 and PD1
+
+    // Enable interrupts for INT0 and INT1
+    EICRA = (1<<ISC11) | (1<<ISC01);  // Set both INT0 and INT1 to trigger on falling edge
+    sei();         // Enable global interrupts
+    EIMSK |= (1<<INT1) | (1 << INT0);  // Enable INT0 and INT1 interrupts
+}
+
+void loop() {
+        // Read ADC VALUE 10 bits
+        adc_data = ADCW;
+        // check button
+        bool buttonState = digitalRead(4);  // Read button state
+    // Check for button press (falling edge detection)
+        if (buttonState == LOW && lastButtonState == HIGH) {
+            mode = !mode;  // Toggle mode between 0 and 1
+            Serial.print("Mode changed to: ");
+            Serial.println(mode);
+            Serial.print("Frequency hop: ");
+            Serial.println(frequency);
+            Serial.print("Duty: ");
+            Serial.println(duty);
+            delay(200);  // Debounce delay
+        }
+        // ODECITANI A SCITANI PODLE HODNOTY POTENCIOMETRU A STRIDA
+        if(mode){
+            digitalWrite(5,HIGH); // FREQUENCY
+            frequencyhop = map(adc_data, 0, 1023, 0, 10000);
+            changefrequency(frequency);
+        }
+        else{
+           digitalWrite(5,LOW); // DUTY
+           duty = map(adc_data, 0, 1023, 0, 255);
+           changepwmduty(duty);
+        }
+        lastButtonState = buttonState;  // Update last state
+
+        delay(50);
+}
